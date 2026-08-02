@@ -10,7 +10,7 @@
     if (document.querySelector("link[data-play-styles]")) return;
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = "/play-mode.css?v=1";
+    link.href = "/play-mode.css?v=2";
     link.dataset.playStyles = "true";
     document.head.appendChild(link);
   }
