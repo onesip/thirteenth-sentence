@@ -1,6 +1,6 @@
 import { IDENTITY_POOL } from "../lib/constants.js";
 import { randomCode, randomId, encryptState, canEncryptState, hashValue } from "../lib/crypto-state.js";
-import { callDeepSeek, mergeUsageTotals, proModel } from "../lib/deepseek.js";
+import { callDeepSeek, fastModel, mergeUsageTotals, proModel } from "../lib/deepseek.js";
 import { createFallbackStory, fallbackOpening } from "../lib/fallback.js";
 import { json, methodNotAllowed, readJson, requestIp } from "../lib/http.js";
 import { directorFoundationPrompt, seedSystemPrompt, seedUserPrompt } from "../lib/prompts.js";
@@ -22,14 +22,73 @@ async function getSeedAiPermission(ipKey) {
   if (!cloudConfigured()) return { allowAi: true };
 
   const deviceDailyLimit = Math.max(20, Number(process.env.DEVICE_DAILY_AI_LIMIT || 80));
-  const deviceDaily = await enforceRateLimit({ key: ipKey, scope: "seed-device-day", limit: deviceDailyLimit, windowMinutes: 1440 });
+  const deviceDaily = await enforceRateLimit({
+    key: ipKey,
+    scope: "seed-device-day",
+    limit: deviceDailyLimit,
+    windowMinutes: 1440
+  });
   if (!deviceDaily.allowed) return { allowAi: false, fallbackReason: "device-daily-budget" };
 
   const globalDailyLimit = Math.max(50, Number(process.env.DAILY_AI_LIMIT || 150));
-  const globalDaily = await enforceRateLimit({ key: "__global__", scope: "seed-global-day", limit: globalDailyLimit, windowMinutes: 1440 });
+  const globalDaily = await enforceRateLimit({
+    key: "__global__",
+    scope: "seed-global-day",
+    limit: globalDailyLimit,
+    windowMinutes: 1440
+  });
   if (!globalDaily.allowed) return { allowAi: false, fallbackReason: "global-daily-budget" };
 
   return { allowAi: true };
+}
+
+async function generateSeed({ playerCount, identities, legacyFragment, ipKey }) {
+  const user = seedUserPrompt({
+    playerCount,
+    identities,
+    legacyFragment,
+    randomSeed: `${Date.now()}-${randomCode(6)}`
+  });
+
+  const attempts = [
+    {
+      model: proModel(),
+      thinking: false,
+      reasoningEffort: "high",
+      maxTokens: 3200,
+      timeoutMs: 14000,
+      aiMode: "deepseek-pro-fast"
+    },
+    {
+      model: fastModel(),
+      thinking: false,
+      reasoningEffort: "high",
+      maxTokens: 3000,
+      timeoutMs: 10000,
+      aiMode: "deepseek-flash-recovery"
+    }
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const result = await callDeepSeek({
+        model: attempt.model,
+        system: [directorFoundationPrompt, seedSystemPrompt],
+        user,
+        thinking: attempt.thinking,
+        reasoningEffort: attempt.reasoningEffort,
+        maxTokens: attempt.maxTokens,
+        timeoutMs: attempt.timeoutMs,
+        userId: ipKey
+      });
+      return { result, aiMode: attempt.aiMode };
+    } catch (error) {
+      lastError = error;
+      console.error(`DeepSeek seed attempt failed (${attempt.aiMode})`, error);
+    }
+  }
+  throw lastError || new Error("DEEPSEEK_SEED_FAILED");
 }
 
 export default async function handler(req, res) {
@@ -42,18 +101,28 @@ export default async function handler(req, res) {
     const ipKey = hashValue(requestIp(req));
 
     if (cloudConfigured()) {
-      const rate = await enforceRateLimit({ key: ipKey, scope: "create-session", limit: 20, windowMinutes: 60 });
-      if (!rate.allowed) return json(res, 429, { error: "这台设备今天打开的档案太多了，请稍后再试。" });
+      const rate = await enforceRateLimit({
+        key: ipKey,
+        scope: "create-session",
+        limit: 20,
+        windowMinutes: 60
+      });
+      if (!rate.allowed) {
+        return json(res, 429, { error: "这台设备今天打开的档案太多了，请稍后再试。" });
+      }
     }
 
     const aiPermission = await getSeedAiPermission(ipKey);
     let legacyFragment = null;
     let legacyCount = 0;
     const sourceArchiveSlug = String(body.sourceArchiveSlug || "").trim();
+
     if (cloudConfigured()) {
       try {
         [legacyFragment, { legacyCount }] = await Promise.all([
-          sourceArchiveSlug ? getLegacyFragmentByArchiveSlug(sourceArchiveSlug) : getLegacyFragment(),
+          sourceArchiveSlug
+            ? getLegacyFragmentByArchiveSlug(sourceArchiveSlug)
+            : getLegacyFragment(),
           archiveStats()
         ]);
       } catch (error) {
@@ -70,22 +139,19 @@ export default async function handler(req, res) {
 
     if (aiPermission.allowAi && process.env.DEEPSEEK_API_KEY) {
       try {
-        const result = await callDeepSeek({
-          model: proModel(),
-          system: [directorFoundationPrompt, seedSystemPrompt],
-          user: seedUserPrompt({ playerCount, identities, legacyFragment, randomSeed: `${Date.now()}-${randomCode(6)}` }),
-          thinking: true,
-          reasoningEffort: "high",
-          maxTokens: 5200,
-          userId: ipKey
+        const generated = await generateSeed({
+          playerCount,
+          identities,
+          legacyFragment,
+          ipKey
         });
-        const validated = validateSeed(result.data, fallbackStory, fallbackOpen);
+        const validated = validateSeed(generated.result.data, fallbackStory, fallbackOpen);
         storyBible = validated.storyBible;
         opening = validated.opening;
-        aiMode = "deepseek-pro";
-        aiUsage = mergeUsageTotals(aiUsage, result);
+        aiMode = generated.aiMode;
+        aiUsage = mergeUsageTotals(aiUsage, generated.result);
       } catch (error) {
-        console.error("DeepSeek seed failed; fallback used", error);
+        console.error("All DeepSeek seed attempts failed; fallback used", error);
       }
     }
 
