@@ -17,11 +17,11 @@ onesip/thirteenth-sentence
 1. 新建 Supabase 项目。
 2. 打开 SQL Editor。
 3. 粘贴并运行 `supabase/schema.sql`。
-4. 在 Project Settings → API 复制：
+4. 在 Project Settings → API Keys 复制：
    - Project URL → `SUPABASE_URL`
-   - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY`
+   - Secret key（`sb_secret_...`）→ `SUPABASE_SECRET_KEY`
 
-`service_role` 只能放在 Vercel 服务端环境变量，不能放到浏览器或聊天公开信息中。
+新版 Secret key 只能放在 Vercel 服务端环境变量，不能放到浏览器、GitHub或聊天公开信息中。旧项目也可继续使用 legacy `service_role` JWT，填到 `SUPABASE_SERVICE_ROLE_KEY`；两者只填一个。
 
 ## C. Vercel
 
@@ -37,7 +37,7 @@ DEEPSEEK_FAST_MODEL=deepseek-v4-flash
 DEEPSEEK_PRO_MODEL=deepseek-v4-pro
 SESSION_SECRET=至少32位随机字符串
 SUPABASE_URL=Supabase Project URL
-SUPABASE_SERVICE_ROLE_KEY=Supabase service_role key
+SUPABASE_SECRET_KEY=Supabase sb_secret_... key
 DAILY_AI_LIMIT=1000
 ```
 
