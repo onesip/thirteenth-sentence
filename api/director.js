@@ -61,15 +61,30 @@ async function getAiPermission(req) {
   if (!cloudConfigured()) return { allowAi: true };
 
   const key = hashValue(requestIp(req));
-  const minute = await enforceRateLimit({ key, scope: "director-minute", limit: 12, windowMinutes: 1 });
+  const minute = await enforceRateLimit({
+    key,
+    scope: "director-minute",
+    limit: 12,
+    windowMinutes: 1
+  });
   if (!minute.allowed) throw new Error("RATE_LIMIT_MINUTE");
 
   const deviceDailyLimit = Math.max(20, Number(process.env.DEVICE_DAILY_AI_LIMIT || 80));
-  const deviceDaily = await enforceRateLimit({ key, scope: "director-device-day", limit: deviceDailyLimit, windowMinutes: 1440 });
+  const deviceDaily = await enforceRateLimit({
+    key,
+    scope: "director-device-day",
+    limit: deviceDailyLimit,
+    windowMinutes: 1440
+  });
   if (!deviceDaily.allowed) return { allowAi: false, fallbackReason: "device-daily-budget" };
 
   const globalDailyLimit = Math.max(50, Number(process.env.DAILY_AI_LIMIT || 150));
-  const globalDaily = await enforceRateLimit({ key: "__global__", scope: "director-global-day", limit: globalDailyLimit, windowMinutes: 1440 });
+  const globalDaily = await enforceRateLimit({
+    key: "__global__",
+    scope: "director-global-day",
+    limit: globalDailyLimit,
+    windowMinutes: 1440
+  });
   if (!globalDaily.allowed) return { allowAi: false, fallbackReason: "global-daily-budget" };
 
   return { allowAi: true };
@@ -79,14 +94,16 @@ async function runAdvance(state, action, fallbackPublic, fallbackChoices, allowA
   if (!allowAi || !process.env.DEEPSEEK_API_KEY) {
     return { public: fallbackPublic, privatePatch: {}, aiMode: "fallback" };
   }
+
   try {
     const result = await callDeepSeek({
       model: fastModel(),
       system: [directorFoundationPrompt, storyContextPrompt(state), advanceSystemPrompt],
       user: advanceUserPrompt({ phase: action, state }),
       thinking: false,
-      reasoningEffort: "low",
-      maxTokens: 2800,
+      reasoningEffort: "high",
+      maxTokens: 2400,
+      timeoutMs: 12000,
       userId: hashValue(state.sessionId)
     });
     const validated = validateAdvance(result.data, fallbackPublic, action, fallbackChoices);
@@ -97,12 +114,61 @@ async function runAdvance(state, action, fallbackPublic, fallbackChoices, allowA
   }
 }
 
+async function generateFinalArchive(state, fallbackArchive) {
+  const system = [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt];
+  const user = finalUserPrompt({ state });
+  const attempts = [
+    {
+      model: proModel(),
+      thinking: false,
+      reasoningEffort: "high",
+      maxTokens: 5600,
+      timeoutMs: 18000,
+      aiMode: "deepseek-pro-fast"
+    },
+    {
+      model: fastModel(),
+      thinking: false,
+      reasoningEffort: "high",
+      maxTokens: 5000,
+      timeoutMs: 12000,
+      aiMode: "deepseek-flash-recovery"
+    }
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const result = await callDeepSeek({
+        model: attempt.model,
+        system,
+        user,
+        thinking: attempt.thinking,
+        reasoningEffort: attempt.reasoningEffort,
+        maxTokens: attempt.maxTokens,
+        timeoutMs: attempt.timeoutMs,
+        userId: hashValue(state.sessionId)
+      });
+      return {
+        archive: validateArchive(result.data, fallbackArchive, state),
+        result,
+        aiMode: attempt.aiMode
+      };
+    } catch (error) {
+      lastError = error;
+      console.error(`DeepSeek finalize attempt failed (${attempt.aiMode})`, error);
+    }
+  }
+  throw lastError || new Error("DEEPSEEK_FINALIZE_FAILED");
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
   try {
     const body = await readJson(req);
     const action = String(body.action || "");
     if (!expectedPhase(action)) return json(res, 400, { error: "档案阶段无效。" });
+
     const loaded = await loadState(body);
     let state = loaded.state;
     if (state.phase !== expectedPhase(action)) {
@@ -117,13 +183,20 @@ export default async function handler(req, res) {
     if (action === "after_first_rule") {
       state.firstRule = validateContribution(body.firstRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterFirstRule(state);
-      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_ONE, aiPermission.allowAi);
+      const result = await runAdvance(
+        state,
+        action,
+        fallbackPublic,
+        DEFAULT_CHOICES_ONE,
+        aiPermission.allowAi
+      );
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_first_choice";
       state.aiCalls += result.aiMode.startsWith("deepseek") ? 1 : 0;
       publicResult = result.public;
       aiMode = result.aiMode;
+
       if (loaded.mode === "supabase") {
         await insertContribution({
           state,
@@ -138,7 +211,9 @@ export default async function handler(req, res) {
 
     if (action === "after_first_choice") {
       const allowed = DEFAULT_CHOICES_ONE.map((choice) => choice.id);
-      if (!allowed.includes(body.firstChoice)) return json(res, 400, { error: "请选择档案中存在的处理方式。" });
+      if (!allowed.includes(body.firstChoice)) {
+        return json(res, 400, { error: "请选择档案中存在的处理方式。" });
+      }
       state.firstChoice = body.firstChoice;
       const fallbackPublic = fallbackAfterFirstChoice(state);
       const result = await runAdvance(state, action, fallbackPublic, [], aiPermission.allowAi);
@@ -148,67 +223,108 @@ export default async function handler(req, res) {
       state.aiCalls += result.aiMode.startsWith("deepseek") ? 1 : 0;
       publicResult = result.public;
       aiMode = result.aiMode;
+
       if (loaded.mode === "supabase") {
-        await insertContribution({ state, phase: action, content: state.firstChoice, contributionType: "choice", ownerIndex: Math.min(1, state.playerCount - 1) });
+        await insertContribution({
+          state,
+          phase: action,
+          content: state.firstChoice,
+          contributionType: "choice",
+          ownerIndex: Math.min(1, state.playerCount - 1)
+        });
       }
     }
 
     if (action === "after_second_rule") {
       state.secondRule = validateContribution(body.secondRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterSecondRule(state);
-      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_FINAL, aiPermission.allowAi);
+      const result = await runAdvance(
+        state,
+        action,
+        fallbackPublic,
+        DEFAULT_CHOICES_FINAL,
+        aiPermission.allowAi
+      );
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_final_choice";
       state.aiCalls += result.aiMode.startsWith("deepseek") ? 1 : 0;
       publicResult = result.public;
       aiMode = result.aiMode;
-      if (state.playerCount >= 3 && !publicResult.finalNotePrompt) publicResult.finalNotePrompt = fallbackPublic.finalNotePrompt;
+
+      if (state.playerCount >= 3 && !publicResult.finalNotePrompt) {
+        publicResult.finalNotePrompt = fallbackPublic.finalNotePrompt;
+      }
       if (loaded.mode === "supabase") {
-        await insertContribution({ state, phase: action, content: state.secondRule, contributionType: "sentence", ownerIndex: Math.min(1, state.playerCount - 1), motifs: extractMotifs(state.secondRule) });
+        await insertContribution({
+          state,
+          phase: action,
+          content: state.secondRule,
+          contributionType: "sentence",
+          ownerIndex: Math.min(1, state.playerCount - 1),
+          motifs: extractMotifs(state.secondRule)
+        });
       }
     }
 
     if (action === "finalize") {
       const allowed = DEFAULT_CHOICES_FINAL.map((choice) => choice.id);
-      if (!allowed.includes(body.finalChoice)) return json(res, 400, { error: "请选择档案中存在的最终行动。" });
+      if (!allowed.includes(body.finalChoice)) {
+        return json(res, 400, { error: "请选择档案中存在的最终行动。" });
+      }
+
       state.finalChoice = body.finalChoice;
-      state.finalNote = body.finalNote ? validateContribution(body.finalNote, { min: 6, max: 90 }) : "";
+      state.finalNote = body.finalNote
+        ? validateContribution(body.finalNote, { min: 6, max: 90 })
+        : "";
+
       const fallbackArchive = fallbackFinalArchive(state);
       let archive = fallbackArchive;
       aiMode = "fallback";
+
       if (aiPermission.allowAi && process.env.DEEPSEEK_API_KEY) {
         try {
-          const result = await callDeepSeek({
-            model: proModel(),
-            system: [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt],
-            user: finalUserPrompt({ state }),
-            thinking: true,
-            reasoningEffort: "high",
-            maxTokens: 7600,
-            userId: hashValue(state.sessionId)
-          });
-          archive = validateArchive(result.data, fallbackArchive, state);
-          aiMode = "deepseek-pro";
+          const generated = await generateFinalArchive(state, fallbackArchive);
+          archive = generated.archive;
+          aiMode = generated.aiMode;
           state.aiCalls += 1;
-          state.aiUsage = mergeUsageTotals(state.aiUsage, result);
+          state.aiUsage = mergeUsageTotals(state.aiUsage, generated.result);
         } catch (error) {
-          console.error("DeepSeek finalize failed; fallback used", error);
+          console.error("All DeepSeek finalize attempts failed; fallback used", error);
         }
       }
+
       state.phase = "sealed";
       state.sealedAt = new Date().toISOString();
+
       if (loaded.mode === "supabase") {
-        await insertContribution({ state, phase: action, content: state.finalChoice, contributionType: "choice", ownerIndex: Math.min(2, state.playerCount - 1) });
-        if (state.finalNote) await insertContribution({ state, phase: "final_note", content: state.finalNote, contributionType: "sentence", ownerIndex: Math.min(2, state.playerCount - 1), motifs: extractMotifs(state.finalNote) });
+        await insertContribution({
+          state,
+          phase: action,
+          content: state.finalChoice,
+          contributionType: "choice",
+          ownerIndex: Math.min(2, state.playerCount - 1)
+        });
+        if (state.finalNote) {
+          await insertContribution({
+            state,
+            phase: "final_note",
+            content: state.finalNote,
+            contributionType: "sentence",
+            ownerIndex: Math.min(2, state.playerCount - 1),
+            motifs: extractMotifs(state.finalNote)
+          });
+        }
         const saved = await saveArchive(state, archive);
         shareSlug = saved.slug;
       }
+
       publicResult = { archive };
     }
 
     const status = state.phase === "sealed" ? "sealed" : "active";
     const stateToken = await persist(state, loaded.mode, status);
+
     return json(res, 200, {
       ...publicResult,
       sessionId: state.sessionId,
@@ -222,9 +338,17 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error("director error", error);
     const code = String(error?.message || "");
-    if (code === "SESSION_NOT_FOUND" || code.includes("INVALID_STATE_TOKEN")) return json(res, 401, { error: "这份档案的临时通行证已经失效，请重新开局。" });
-    if (code === "RATE_LIMIT_MINUTE") return json(res, 429, { error: "档案翻页太快了，请停一会儿再继续。" });
-    if (error instanceof Error && /记录|档案|至少|最多|填写|重复字符/.test(error.message)) return json(res, 400, { error: error.message });
-    return json(res, 500, { error: "档案暂时无法继续，但你写下的句子没有丢失。请再试一次。" });
+    if (code === "SESSION_NOT_FOUND" || code.includes("INVALID_STATE_TOKEN")) {
+      return json(res, 401, { error: "这份档案的临时通行证已经失效，请重新开局。" });
+    }
+    if (code === "RATE_LIMIT_MINUTE") {
+      return json(res, 429, { error: "档案翻页太快了，请停一会儿再继续。" });
+    }
+    if (error instanceof Error && /记录|档案|至少|最多|填写|重复字符/.test(error.message)) {
+      return json(res, 400, { error: error.message });
+    }
+    return json(res, 500, {
+      error: "档案暂时无法继续，但你写下的句子没有丢失。请再试一次。"
+    });
   }
 }
