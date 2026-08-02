@@ -1,7 +1,8 @@
 import { randomCode, randomId, encryptState, canEncryptState, hashValue } from "../lib/crypto-state.js";
 import { callDeepSeek, fastModel, mergeUsageTotals } from "../lib/deepseek.js";
 import { json, methodNotAllowed, readJson, requestIp } from "../lib/http.js";
-import { fallbackSeed, normalizeSeed, publicRules, rolesForParty } from "../lib/play-core.js";
+import { publicRules, rolesForParty } from "../lib/play-core.js";
+import { fallbackBlueprint, normalizePlayBlueprint } from "../lib/play-blueprint.js";
 import { playFoundationPrompt, playSeedUserPrompt } from "../lib/play-prompts.js";
 import {
   cloudConfigured,
@@ -14,19 +15,19 @@ import {
 async function aiPermission(ipKey) {
   if (!process.env.DEEPSEEK_API_KEY) return { allowAi: false, reason: "no-key" };
   if (!cloudConfigured()) return { allowAi: true };
-  const minute = await enforceRateLimit({ key: ipKey, scope: "play-seed-minute", limit: 5, windowMinutes: 1 });
+  const minute = await enforceRateLimit({ key: ipKey, scope: "play-blueprint-minute", limit: 4, windowMinutes: 1 });
   if (!minute.allowed) return { allowAi: false, reason: "minute-limit" };
   const device = await enforceRateLimit({
     key: ipKey,
-    scope: "play-seed-device-day",
-    limit: Math.max(12, Number(process.env.DEVICE_DAILY_AI_LIMIT || 40)),
+    scope: "play-blueprint-device-day",
+    limit: Math.max(8, Number(process.env.DEVICE_DAILY_AI_LIMIT || 40)),
     windowMinutes: 1440
   });
   if (!device.allowed) return { allowAi: false, reason: "device-budget" };
   const global = await enforceRateLimit({
     key: "__global__",
-    scope: "play-seed-global-day",
-    limit: Math.max(30, Number(process.env.DAILY_AI_LIMIT || 60)),
+    scope: "play-blueprint-global-day",
+    limit: Math.max(24, Number(process.env.DAILY_AI_LIMIT || 60)),
     windowMinutes: 1440
   });
   return global.allowed ? { allowAi: true } : { allowAi: false, reason: "global-budget" };
@@ -48,9 +49,9 @@ export default async function handler(req, res) {
     const ipKey = hashValue(requestIp(req));
     const permission = await aiPermission(ipKey);
     const roleOrder = rolesForParty(partySize);
-    const fallback = fallbackSeed(archiveRecord, partySize);
+    const fallback = fallbackBlueprint(archiveRecord, partySize);
     let generated = fallback;
-    let aiMode = "fallback-survival";
+    let aiMode = "fallback-blueprint-v2";
     let aiUsage = {};
 
     if (permission.allowAi) {
@@ -65,23 +66,24 @@ export default async function handler(req, res) {
             randomSeed: `${Date.now()}-${randomCode(8)}`
           }),
           thinking: false,
-          reasoningEffort: "medium",
-          maxTokens: 2600,
-          timeoutMs: 12000,
+          reasoningEffort: "high",
+          maxTokens: 3600,
+          timeoutMs: 18000,
           userId: ipKey
         });
-        generated = normalizeSeed(result.data, archiveRecord, partySize);
-        aiMode = "deepseek-survival-seed";
+        generated = normalizePlayBlueprint(result.data, archiveRecord, partySize);
+        aiMode = "deepseek-five-scene-blueprint";
         aiUsage = mergeUsageTotals(aiUsage, result);
       } catch (error) {
-        console.error("play seed missed deadline; fallback used", error);
+        console.error("play blueprint missed deadline; complete local blueprint used", error);
       }
     }
 
     const sessionId = randomId();
     const state = {
-      version: 3,
+      version: 4,
       mode: "enter_archive",
+      aiStrategy: "blueprint-local-final",
       sessionId,
       roomCode: randomCode(6),
       // Existing database constraint supports 1-3. partySize preserves the real 1-4 same-screen group size.
@@ -99,6 +101,8 @@ export default async function handler(req, res) {
       sourceArchiveRecord: archiveRecord,
       ruleHandbook: publicRules(archiveRecord),
       privateBible: generated.privateBible,
+      endingGuide: generated.endingGuide,
+      scenePlan: generated.scenePlan,
       publicOpening: generated.publicOpening,
       currentScene: generated.publicOpening.firstScene,
       phase: "play_scene",
@@ -132,6 +136,8 @@ export default async function handler(req, res) {
       stateToken,
       cloudMode,
       aiMode,
+      aiStrategy: state.aiStrategy,
+      plannedAiCallsPerGame: 2,
       budgetFallback: permission.reason || null,
       archive: {
         slug: archiveRecord.share_slug,
