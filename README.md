@@ -41,13 +41,13 @@ DEEPSEEK_PRO_MODEL=deepseek-v4-pro
 DEEPSEEK_CACHE_DEBUG=false
 SESSION_SECRET=
 SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_SECRET_KEY=
 DAILY_AI_LIMIT=1000
 ```
 
 - `DEEPSEEK_API_KEY`：开启动态叙事。
 - `SESSION_SECRET`：在没有数据库或数据库短暂不可用时，加密整局私密状态。
-- `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`：开启跨设备旧档案与封存分享。
+- `SUPABASE_URL` / `SUPABASE_SECRET_KEY`：开启跨设备旧档案与封存分享。旧项目也兼容 `SUPABASE_SERVICE_ROLE_KEY`。
 - 所有敏感值只放在 Vercel Environment Variables，绝不能写进 `game.js` 或提交到 GitHub。
 
 ## 验证
