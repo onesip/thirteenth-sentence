@@ -24,13 +24,7 @@
     }
   ],
   "rewrites": [
-    { "source": "/archive/:slug", "destination": "/index.html?archive=:slug" },
-    { "source": "/world/:path*", "destination": "/index.html" },
-    { "source": "/share/:path*", "destination": "/index.html" },
-    { "source": "/shared/:path*", "destination": "/index.html" },
-    { "source": "/continue/:path*", "destination": "/index.html" },
-    { "source": "/branch/:path*", "destination": "/index.html" },
-    { "source": "/play/:path*", "destination": "/index.html" },
-    { "source": "/:path*", "destination": "/index.html" }
+    { "source": "/archive/:slug", "destination": "/index?archive=:slug" },
+    { "source": "/(.*)", "destination": "/index" }
   ]
 }
