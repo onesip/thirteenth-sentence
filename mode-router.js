@@ -1,6 +1,8 @@
 (() => {
   const root = document.getElementById("scene");
   const appRoot = document.getElementById("app");
+  const brandButton = document.getElementById("brandButton");
+  const topStatus = document.querySelector(".top-status");
   const params = new URLSearchParams(location.search);
   const path = location.pathname.replace(/\/+$/, "") || "/";
 
@@ -31,12 +33,23 @@
     root.innerHTML = "";
   }
 
+  function useSharedHeader() {
+    if (topStatus) topStatus.style.display = "none";
+    if (brandButton) brandButton.onclick = () => showModeHome();
+  }
+
+  function useCreatorHeader() {
+    if (topStatus) topStatus.style.display = "";
+    if (brandButton) brandButton.onclick = null;
+  }
+
   function showModeHome() {
     if (location.pathname !== "/" || location.search) {
       location.href = "/";
       return;
     }
     resetShell();
+    useSharedHeader();
     root.innerHTML = `
       <section class="mode-shell">
         <span class="mode-kicker">THIRTEENTH SENTENCE · TWO MODES</span>
@@ -71,6 +84,7 @@
 
   async function mountPlay(slug = "") {
     resetShell();
+    useSharedHeader();
     try {
       await loadScript("/play-mode.js?v=1");
       await window.ThirteenthPlay.mount({ slug });
@@ -81,6 +95,7 @@
 
   async function mountCreator() {
     resetShell();
+    useCreatorHeader();
     try {
       await loadScript("/loader.js?v=8");
     } catch (error) {
