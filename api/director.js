@@ -1,5 +1,5 @@
 import { decryptState, encryptState, canEncryptState, hashValue } from "../lib/crypto-state.js";
-import { callDeepSeek, fastModel, mergeUsageTotals, proModel } from "../lib/deepseek.js";
+import { callDeepSeek, fastModel, mergeUsageTotals } from "../lib/deepseek.js";
 import {
   extractMotifs,
   fallbackAfterFirstChoice,
@@ -61,12 +61,7 @@ async function getAiPermission(req) {
   if (!cloudConfigured()) return { allowAi: true };
 
   const key = hashValue(requestIp(req));
-  const minute = await enforceRateLimit({
-    key,
-    scope: "director-minute",
-    limit: 12,
-    windowMinutes: 1
-  });
+  const minute = await enforceRateLimit({ key, scope: "director-minute", limit: 12, windowMinutes: 1 });
   if (!minute.allowed) throw new Error("RATE_LIMIT_MINUTE");
 
   const deviceDailyLimit = Math.max(20, Number(process.env.DEVICE_DAILY_AI_LIMIT || 80));
@@ -101,65 +96,36 @@ async function runAdvance(state, action, fallbackPublic, fallbackChoices, allowA
       system: [directorFoundationPrompt, storyContextPrompt(state), advanceSystemPrompt],
       user: advanceUserPrompt({ phase: action, state }),
       thinking: false,
-      reasoningEffort: "high",
-      maxTokens: 2400,
-      timeoutMs: 12000,
+      reasoningEffort: "low",
+      maxTokens: 1800,
+      timeoutMs: 10000,
       userId: hashValue(state.sessionId)
     });
     const validated = validateAdvance(result.data, fallbackPublic, action, fallbackChoices);
     return { ...validated, aiMode: "deepseek-flash", usageResult: result };
   } catch (error) {
-    console.error(`DeepSeek ${action} failed; fallback used`, error);
+    console.error(`DeepSeek ${action} missed the live deadline; fallback used`, error);
     return { public: fallbackPublic, privatePatch: {}, aiMode: "fallback" };
   }
 }
 
 async function generateFinalArchive(state, fallbackArchive) {
-  const system = [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt];
-  const user = finalUserPrompt({ state });
-  const attempts = [
-    {
-      model: proModel(),
-      thinking: false,
-      reasoningEffort: "high",
-      maxTokens: 5600,
-      timeoutMs: 18000,
-      aiMode: "deepseek-pro-fast"
-    },
-    {
-      model: fastModel(),
-      thinking: false,
-      reasoningEffort: "high",
-      maxTokens: 5000,
-      timeoutMs: 12000,
-      aiMode: "deepseek-flash-recovery"
-    }
-  ];
+  const result = await callDeepSeek({
+    model: fastModel(),
+    system: [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt],
+    user: finalUserPrompt({ state }),
+    thinking: false,
+    reasoningEffort: "high",
+    maxTokens: 4200,
+    timeoutMs: 16000,
+    userId: hashValue(state.sessionId)
+  });
 
-  let lastError = null;
-  for (const attempt of attempts) {
-    try {
-      const result = await callDeepSeek({
-        model: attempt.model,
-        system,
-        user,
-        thinking: attempt.thinking,
-        reasoningEffort: attempt.reasoningEffort,
-        maxTokens: attempt.maxTokens,
-        timeoutMs: attempt.timeoutMs,
-        userId: hashValue(state.sessionId)
-      });
-      return {
-        archive: validateArchive(result.data, fallbackArchive, state),
-        result,
-        aiMode: attempt.aiMode
-      };
-    } catch (error) {
-      lastError = error;
-      console.error(`DeepSeek finalize attempt failed (${attempt.aiMode})`, error);
-    }
-  }
-  throw lastError || new Error("DEEPSEEK_FINALIZE_FAILED");
+  return {
+    archive: validateArchive(result.data, fallbackArchive, state),
+    result,
+    aiMode: "deepseek-flash-final"
+  };
 }
 
 export default async function handler(req, res) {
@@ -183,13 +149,7 @@ export default async function handler(req, res) {
     if (action === "after_first_rule") {
       state.firstRule = validateContribution(body.firstRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterFirstRule(state);
-      const result = await runAdvance(
-        state,
-        action,
-        fallbackPublic,
-        DEFAULT_CHOICES_ONE,
-        aiPermission.allowAi
-      );
+      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_ONE, aiPermission.allowAi);
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_first_choice";
@@ -238,13 +198,7 @@ export default async function handler(req, res) {
     if (action === "after_second_rule") {
       state.secondRule = validateContribution(body.secondRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterSecondRule(state);
-      const result = await runAdvance(
-        state,
-        action,
-        fallbackPublic,
-        DEFAULT_CHOICES_FINAL,
-        aiPermission.allowAi
-      );
+      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_FINAL, aiPermission.allowAi);
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_final_choice";
@@ -290,7 +244,7 @@ export default async function handler(req, res) {
           state.aiCalls += 1;
           state.aiUsage = mergeUsageTotals(state.aiUsage, generated.result);
         } catch (error) {
-          console.error("All DeepSeek finalize attempts failed; fallback used", error);
+          console.error("DeepSeek final archive missed the live deadline; fallback used", error);
         }
       }
 
