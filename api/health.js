@@ -9,6 +9,16 @@ export default async function handler(req, res) {
     cloud: cloudConfigured(),
     stateEncryption: Boolean(process.env.SESSION_SECRET || process.env.DEEPSEEK_API_KEY),
     fastModel: process.env.DEEPSEEK_FAST_MODEL || "deepseek-v4-flash",
-    proModel: process.env.DEEPSEEK_PRO_MODEL || "deepseek-v4-pro"
+    proModel: process.env.DEEPSEEK_PRO_MODEL || "deepseek-v4-pro",
+    experienceVersion: "create-and-enter-v1",
+    twoModes: true,
+    enterArchive: {
+      enabled: true,
+      scenes: 5,
+      partySizes: [1, 2, 3, 4],
+      butterflyChoices: true,
+      identityReveal: true,
+      ruleByRuleEnding: true
+    }
   });
 }
