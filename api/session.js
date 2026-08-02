@@ -1,6 +1,6 @@
 import { IDENTITY_POOL } from "../lib/constants.js";
 import { randomCode, randomId, encryptState, canEncryptState, hashValue } from "../lib/crypto-state.js";
-import { callDeepSeek, fastModel, mergeUsageTotals, proModel } from "../lib/deepseek.js";
+import { callDeepSeek, fastModel, mergeUsageTotals } from "../lib/deepseek.js";
 import { createFallbackStory, fallbackOpening } from "../lib/fallback.js";
 import { json, methodNotAllowed, readJson, requestIp } from "../lib/http.js";
 import { directorFoundationPrompt, seedSystemPrompt, seedUserPrompt } from "../lib/prompts.js";
@@ -50,45 +50,18 @@ async function generateSeed({ playerCount, identities, legacyFragment, ipKey }) 
     randomSeed: `${Date.now()}-${randomCode(6)}`
   });
 
-  const attempts = [
-    {
-      model: proModel(),
-      thinking: false,
-      reasoningEffort: "high",
-      maxTokens: 3200,
-      timeoutMs: 14000,
-      aiMode: "deepseek-pro-fast"
-    },
-    {
-      model: fastModel(),
-      thinking: false,
-      reasoningEffort: "high",
-      maxTokens: 3000,
-      timeoutMs: 10000,
-      aiMode: "deepseek-flash-recovery"
-    }
-  ];
+  const result = await callDeepSeek({
+    model: fastModel(),
+    system: [directorFoundationPrompt, seedSystemPrompt],
+    user,
+    thinking: false,
+    reasoningEffort: "low",
+    maxTokens: 2300,
+    timeoutMs: 10000,
+    userId: ipKey
+  });
 
-  let lastError = null;
-  for (const attempt of attempts) {
-    try {
-      const result = await callDeepSeek({
-        model: attempt.model,
-        system: [directorFoundationPrompt, seedSystemPrompt],
-        user,
-        thinking: attempt.thinking,
-        reasoningEffort: attempt.reasoningEffort,
-        maxTokens: attempt.maxTokens,
-        timeoutMs: attempt.timeoutMs,
-        userId: ipKey
-      });
-      return { result, aiMode: attempt.aiMode };
-    } catch (error) {
-      lastError = error;
-      console.error(`DeepSeek seed attempt failed (${attempt.aiMode})`, error);
-    }
-  }
-  throw lastError || new Error("DEEPSEEK_SEED_FAILED");
+  return { result, aiMode: "deepseek-flash-seed" };
 }
 
 export default async function handler(req, res) {
@@ -151,13 +124,13 @@ export default async function handler(req, res) {
         aiMode = generated.aiMode;
         aiUsage = mergeUsageTotals(aiUsage, generated.result);
       } catch (error) {
-        console.error("All DeepSeek seed attempts failed; fallback used", error);
+        console.error("DeepSeek seed failed within the opening deadline; fallback used", error);
       }
     }
 
     identities[0] = opening.primaryIdentity || identities[0];
     const state = {
-      version: 1,
+      version: 2,
       sessionId: randomId(),
       roomCode: randomCode(6),
       playerCount,
