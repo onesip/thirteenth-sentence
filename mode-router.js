@@ -87,6 +87,7 @@
     useSharedHeader();
     try {
       await loadScript("/play-mode.js?v=1");
+      await loadScript("/play-mode-patch.js?v=1");
       await window.ThirteenthPlay.mount({ slug });
     } catch (error) {
       root.innerHTML = `<section class="survival-shell"><div class="error-panel"><h2>进入模式没有成功加载</h2><p>${String(error.message || error)}</p><button class="primary-action" onclick="location.reload()">重新加载</button></div></section>`;
