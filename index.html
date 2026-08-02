@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#17141b" />
+  <meta name="description" content="每一局都会立刻开始，也会完整结束。由真人留下种子、由档案继续生长的匿名共创叙事游戏。" />
+  <title>第十三句｜匿名共创叙事档案馆</title>
+</head>
+<body>
+  <main id="app" class="game-root stage-landing">
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <div class="ambient-orb orb-one" aria-hidden="true"></div>
+    <div class="ambient-orb orb-two" aria-hidden="true"></div>
+    <div class="grain" aria-hidden="true"></div>
+    <header class="topbar">
+      <button class="brand-button" id="brandButton" aria-label="返回档案馆首页">
+        <span>十三</span>
+        <div><strong>第十三句</strong><small>THIRTEENTH SENTENCE</small></div>
+      </button>
+      <div class="top-status">
+        <span id="archiveStatus"></span>
+        <span class="service-dot" id="serviceDot" title="服务状态"></span>
+        <button class="sound" id="soundButton"><i></i><span>开启环境声</span></button>
+      </div>
+    </header>
+    <div id="scene" class="main-frame" aria-live="polite"></div>
+    <footer class="site-footer">
+      <span>每局都有结局，档案世界没有。</span>
+      <span id="footerStatus">正在核验档案馆连接</span>
+    </footer>
+  </main>
+  <script src="/loader.js"></script>
+</body>
+</html>

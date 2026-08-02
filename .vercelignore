@@ -1,0 +1,8 @@
+.env
+.env.*
+legacy-next
+demo
+tests
+scripts
+supabase
+*.md
