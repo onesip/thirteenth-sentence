@@ -1,4 +1,5 @@
 import { json, methodNotAllowed } from "../lib/http.js";
+import { callDeepSeek, fastModel } from "../lib/deepseek.js";
 
 function timeoutSignal(ms) {
   const controller = new AbortController();
@@ -7,11 +8,13 @@ function timeoutSignal(ms) {
 }
 
 function safeError(raw) {
-  const text = String(raw || "").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]").replace(/sb_secret_[A-Za-z0-9_-]+/g, "[redacted]");
-  return text.slice(0, 500);
+  const text = String(raw || "")
+    .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/sb_secret_[A-Za-z0-9_-]+/g, "[redacted]");
+  return text.slice(0, 700);
 }
 
-async function probeDeepSeek() {
+async function probeDeepSeekModels() {
   const key = process.env.DEEPSEEK_API_KEY || "";
   if (!key) return { ok: false, status: 0, error: "DEEPSEEK_API_KEY_MISSING" };
   const timer = timeoutSignal(12000);
@@ -34,6 +37,38 @@ async function probeDeepSeek() {
     return { ok: false, status: 0, error: error?.name === "AbortError" ? "DEEPSEEK_TIMEOUT" : safeError(error?.message) };
   } finally {
     timer.clear();
+  }
+}
+
+async function probeDeepSeekGeneration() {
+  try {
+    const result = await callDeepSeek({
+      model: fastModel(),
+      system: "你是API连通性检测器。只输出合法JSON。",
+      user: "只返回 {\"ok\":true}，不要添加其他文字。",
+      thinking: false,
+      reasoningEffort: "low",
+      maxTokens: 64,
+      userId: "diagnostics"
+    });
+    return {
+      ok: result?.data?.ok === true,
+      model: result?.model || fastModel(),
+      usage: {
+        promptTokens: result?.cache?.promptTokens || 0,
+        completionTokens: result?.cache?.completionTokens || 0,
+        cacheHitTokens: result?.cache?.cacheHitTokens || 0,
+        cacheMissTokens: result?.cache?.cacheMissTokens || 0
+      },
+      error: result?.data?.ok === true ? null : "UNEXPECTED_GENERATION_OUTPUT"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      model: fastModel(),
+      usage: null,
+      error: safeError(error?.details || error?.message)
+    };
   }
 }
 
@@ -70,11 +105,20 @@ async function probeSupabase() {
 
 export default async function handler(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
-  const [deepseek, supabase] = await Promise.all([probeDeepSeek(), probeSupabase()]);
+  const url = new URL(req.url || "/api/diagnostics", "http://localhost");
+  const full = url.searchParams.get("full") === "1";
+  const [deepseek, supabase] = await Promise.all([
+    probeDeepSeekModels(),
+    probeSupabase()
+  ]);
+  const generation = full && deepseek.ok ? await probeDeepSeekGeneration() : null;
   return json(res, 200, {
-    ok: deepseek.ok && supabase.ok,
+    ok: deepseek.ok && supabase.ok && (!full || generation?.ok),
     deepseek,
+    generation,
     supabase,
-    note: "This endpoint validates real upstream connectivity and never returns secret values."
+    note: full
+      ? "Full diagnostics validates the same DeepSeek generation path used by the game."
+      : "Add ?full=1 to validate a real short generation call."
   });
 }
