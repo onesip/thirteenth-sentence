@@ -45,3 +45,18 @@ drop policy if exists "public read archives" on public.archives;
 create policy "public read archives" on public.archives for select to anon, authenticated using (true);
 drop policy if exists "public read approved legacy" on public.legacy_fragments;
 create policy "public read approved legacy" on public.legacy_fragments for select to anon, authenticated using (safety_status = 'approved');
+
+-- Required when “Automatically expose new tables” is disabled.
+grant usage on schema public to service_role;
+grant select, insert, update, delete on table
+  public.game_sessions,
+  public.contributions,
+  public.archives,
+  public.legacy_fragments,
+  public.rate_limit_events
+  to service_role;
+grant usage, select on all sequences in schema public to service_role;
+grant execute on all functions in schema public to service_role;
+alter default privileges in schema public grant select, insert, update, delete on tables to service_role;
+alter default privileges in schema public grant usage, select on sequences to service_role;
+alter default privileges in schema public grant execute on functions to service_role;
