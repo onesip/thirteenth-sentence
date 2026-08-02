@@ -2,14 +2,16 @@ import { randomCode, randomId, encryptState, canEncryptState, hashValue } from "
 import { callDeepSeek, fastModel, mergeUsageTotals } from "../lib/deepseek.js";
 import { json, methodNotAllowed, readJson, requestIp } from "../lib/http.js";
 import { publicRules, rolesForParty } from "../lib/play-core.js";
-import { fallbackBlueprint, normalizePlayBlueprint } from "../lib/play-blueprint.js";
-import { playFoundationPrompt, playSeedUserPrompt } from "../lib/play-prompts.js";
+import { normalizePlayBlueprint } from "../lib/play-blueprint.js";
+import { adaptBlueprintParty, assertBlueprintQuality } from "../lib/play-blueprint-quality.js";
+import { playFoundationPrompt, playRecoveryUserPrompt, playSeedUserPrompt } from "../lib/play-prompts.js";
 import {
   cloudConfigured,
   createSessionRecord,
   enforceRateLimit,
   getArchiveBySlug,
-  getRandomPlayableArchive
+  getRandomPlayableArchive,
+  getReusablePlayBlueprints
 } from "../lib/storage.js";
 
 async function aiPermission(ipKey) {
@@ -33,6 +35,34 @@ async function aiPermission(ipKey) {
   return global.allowed ? { allowAi: true } : { allowAi: false, reason: "global-budget" };
 }
 
+function pickCached(cached, archiveRecord, partySize) {
+  if (!cached.length) return null;
+  const raw = cached[Math.floor(Math.random() * cached.length)];
+  return adaptBlueprintParty(normalizePlayBlueprint(raw, archiveRecord, partySize), partySize);
+}
+
+async function generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, recovery = false }) {
+  const randomSeed = `${Date.now()}-${randomCode(8)}`;
+  const result = await callDeepSeek({
+    model: fastModel(),
+    system: [playFoundationPrompt],
+    user: recovery
+      ? playRecoveryUserPrompt({ archiveRecord, partySize, roleOrder, randomSeed })
+      : playSeedUserPrompt({ archiveRecord, partySize, roleOrder, randomSeed }),
+    thinking: false,
+    reasoningEffort: "low",
+    maxTokens: recovery ? 1800 : 2500,
+    timeoutMs: recovery ? 18000 : 30000,
+    userId: ipKey
+  });
+  assertBlueprintQuality(result.data);
+  return {
+    blueprint: adaptBlueprintParty(normalizePlayBlueprint(result.data, archiveRecord, partySize), partySize),
+    result,
+    mode: recovery ? "deepseek-compact-recovery-blueprint" : "deepseek-five-scene-blueprint"
+  };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
   try {
@@ -46,47 +76,68 @@ export default async function handler(req, res) {
       : await getRandomPlayableArchive(excludedSlugs);
     if (!archiveRecord) return json(res, 404, { error: "还没有可进入的封存档案。先完成一局共创，让规则真正诞生。" });
 
-    const ipKey = hashValue(requestIp(req));
-    const permission = await aiPermission(ipKey);
     const roleOrder = rolesForParty(partySize);
-    const fallback = fallbackBlueprint(archiveRecord, partySize);
-    let generated = fallback;
-    let aiMode = "fallback-blueprint-v2";
-    let aiUsage = {};
+    let cached = [];
+    try {
+      cached = await getReusablePlayBlueprints(archiveRecord.id, 12);
+    } catch (error) {
+      console.error("play blueprint cache read failed", error);
+    }
 
-    if (permission.allowAi) {
-      try {
-        const result = await callDeepSeek({
-          model: fastModel(),
-          system: [playFoundationPrompt],
-          user: playSeedUserPrompt({
-            archiveRecord,
-            partySize,
-            roleOrder,
-            randomSeed: `${Date.now()}-${randomCode(8)}`
-          }),
-          thinking: false,
-          reasoningEffort: "high",
-          maxTokens: 3600,
-          timeoutMs: 18000,
-          userId: ipKey
-        });
-        generated = normalizePlayBlueprint(result.data, archiveRecord, partySize);
-        aiMode = "deepseek-five-scene-blueprint";
-        aiUsage = mergeUsageTotals(aiUsage, result);
-      } catch (error) {
-        console.error("play blueprint missed deadline; complete local blueprint used", error);
+    let generated = null;
+    let aiMode = "";
+    let aiUsage = {};
+    let permissionReason = null;
+    const preferCache = cached.length >= 2 && Math.random() < 0.7;
+
+    if (preferCache) {
+      generated = pickCached(cached, archiveRecord, partySize);
+      aiMode = "cached-ai-blueprint";
+    } else {
+      const ipKey = hashValue(requestIp(req));
+      const permission = await aiPermission(ipKey);
+      permissionReason = permission.reason || null;
+      if (permission.allowAi) {
+        try {
+          const live = await generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, recovery: false });
+          generated = live.blueprint;
+          aiMode = live.mode;
+          aiUsage = mergeUsageTotals(aiUsage, live.result);
+        } catch (firstError) {
+          console.error("full play blueprint failed; compact recovery starting", firstError);
+          try {
+            const recovery = await generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, recovery: true });
+            generated = recovery.blueprint;
+            aiMode = recovery.mode;
+            aiUsage = mergeUsageTotals(aiUsage, recovery.result);
+          } catch (recoveryError) {
+            console.error("compact play blueprint also failed", recoveryError);
+          }
+        }
       }
+      if (!generated && cached.length) {
+        generated = pickCached(cached, archiveRecord, partySize);
+        aiMode = "cached-ai-blueprint-recovery";
+      }
+    }
+
+    if (!generated) {
+      return json(res, 503, {
+        error: permissionReason
+          ? "这份档案现在没有可用的馆藏路线，今日展开额度也暂时不足。请稍后再进入。"
+          : "这份档案没有完整展开。为了不让通用模板破坏故事，本次没有强行进入，请重新尝试。",
+        code: "BLUEPRINT_NOT_READY"
+      });
     }
 
     const sessionId = randomId();
     const state = {
-      version: 4,
+      version: 5,
       mode: "enter_archive",
-      aiStrategy: "blueprint-local-final",
+      aiStrategy: "quality-blueprint-local-final",
+      blueprintSource: aiMode,
       sessionId,
       roomCode: randomCode(6),
-      // Existing database constraint supports 1-3. partySize preserves the real 1-4 same-screen group size.
       playerCount: Math.min(3, partySize),
       partySize,
       identities: roleOrder,
@@ -137,8 +188,8 @@ export default async function handler(req, res) {
       cloudMode,
       aiMode,
       aiStrategy: state.aiStrategy,
-      plannedAiCallsPerGame: 2,
-      budgetFallback: permission.reason || null,
+      plannedAiCallsPerGame: aiMode.startsWith("cached") ? 1 : 2,
+      budgetFallback: permissionReason,
       archive: {
         slug: archiveRecord.share_slug,
         code: archiveRecord.archive_code,
