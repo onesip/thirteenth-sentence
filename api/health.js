@@ -10,7 +10,7 @@ export default async function handler(req, res) {
     stateEncryption: Boolean(process.env.SESSION_SECRET || process.env.DEEPSEEK_API_KEY),
     fastModel: process.env.DEEPSEEK_FAST_MODEL || "deepseek-v4-flash",
     proModel: process.env.DEEPSEEK_PRO_MODEL || "deepseek-v4-pro",
-    experienceVersion: "create-enter-immersive-v4",
+    experienceVersion: "create-enter-immersive-v5",
     visualSystem: "archive-noir-v2",
     twoModes: true,
     enterArchive: {
@@ -20,18 +20,20 @@ export default async function handler(req, res) {
       butterflyChoices: true,
       identityReveal: true,
       ruleByRuleEnding: true,
-      aiStrategy: "bounded-quality-blueprint-local-final",
+      aiStrategy: "compact-scene-spine-plus-local-actions-plus-final",
       plannedAiCallsPerFreshGame: 2,
       plannedAiCallsWithCachedBlueprint: 1,
-      intermediateScenes: "local-causal-engine",
+      intermediateScenes: "contextual-local-causal-engine",
       thinkingMode: false,
-      blueprintQualityGate: true,
-      reusableAiBlueprintCache: true,
+      blueprintQualityGate: "scene-spine",
+      reusableAiBlueprintCache: "v7-only",
       genericSilentFallback: false,
+      aiGeneratesOptions: false,
+      localActionsUseSceneAnchors: true,
       nestedRetries: false,
-      openingPrimaryTimeoutSeconds: 20,
-      openingRecoveryTimeoutSeconds: 12,
-      maximumOpeningWaitSeconds: 32
+      openingPrimaryTimeoutSeconds: 18,
+      openingRecoveryTimeoutSeconds: 10,
+      maximumOpeningWaitSeconds: 28
     }
   });
 }
