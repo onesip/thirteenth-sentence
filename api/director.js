@@ -16,7 +16,7 @@ import {
   finalUserPrompt,
   storyContextPrompt
 } from "../lib/prompts.js";
-import { sanitizeShortText, validateContribution } from "../lib/safety.js";
+import { validateContribution } from "../lib/safety.js";
 import {
   cloudConfigured,
   enforceRateLimit,
@@ -56,18 +56,27 @@ async function persist(state, mode, status = "active") {
   return encryptState(state);
 }
 
-async function maybeRateLimit(req) {
-  if (!cloudConfigured()) return;
+async function getAiPermission(req) {
+  if (!process.env.DEEPSEEK_API_KEY) return { allowAi: false };
+  if (!cloudConfigured()) return { allowAi: true };
+
   const key = hashValue(requestIp(req));
   const minute = await enforceRateLimit({ key, scope: "director-minute", limit: 12, windowMinutes: 1 });
   if (!minute.allowed) throw new Error("RATE_LIMIT_MINUTE");
-  const dailyLimit = Math.max(50, Number(process.env.DAILY_AI_LIMIT || 1000));
-  const daily = await enforceRateLimit({ key, scope: "director-day", limit: dailyLimit, windowMinutes: 1440 });
-  if (!daily.allowed) throw new Error("RATE_LIMIT_DAY");
+
+  const deviceDailyLimit = Math.max(20, Number(process.env.DEVICE_DAILY_AI_LIMIT || 80));
+  const deviceDaily = await enforceRateLimit({ key, scope: "director-device-day", limit: deviceDailyLimit, windowMinutes: 1440 });
+  if (!deviceDaily.allowed) return { allowAi: false, fallbackReason: "device-daily-budget" };
+
+  const globalDailyLimit = Math.max(50, Number(process.env.DAILY_AI_LIMIT || 150));
+  const globalDaily = await enforceRateLimit({ key: "__global__", scope: "director-global-day", limit: globalDailyLimit, windowMinutes: 1440 });
+  if (!globalDaily.allowed) return { allowAi: false, fallbackReason: "global-daily-budget" };
+
+  return { allowAi: true };
 }
 
-async function runAdvance(state, action, fallbackPublic, fallbackChoices) {
-  if (!process.env.DEEPSEEK_API_KEY) {
+async function runAdvance(state, action, fallbackPublic, fallbackChoices, allowAi) {
+  if (!allowAi || !process.env.DEEPSEEK_API_KEY) {
     return { public: fallbackPublic, privatePatch: {}, aiMode: "fallback" };
   }
   try {
@@ -100,7 +109,7 @@ export default async function handler(req, res) {
       return json(res, 409, { error: "这份档案已经翻到下一页，请刷新后继续。" });
     }
 
-    await maybeRateLimit(req);
+    const aiPermission = await getAiPermission(req);
     let publicResult;
     let aiMode = "fallback";
     let shareSlug = null;
@@ -108,7 +117,7 @@ export default async function handler(req, res) {
     if (action === "after_first_rule") {
       state.firstRule = validateContribution(body.firstRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterFirstRule(state);
-      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_ONE);
+      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_ONE, aiPermission.allowAi);
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_first_choice";
@@ -132,7 +141,7 @@ export default async function handler(req, res) {
       if (!allowed.includes(body.firstChoice)) return json(res, 400, { error: "请选择档案中存在的处理方式。" });
       state.firstChoice = body.firstChoice;
       const fallbackPublic = fallbackAfterFirstChoice(state);
-      const result = await runAdvance(state, action, fallbackPublic, []);
+      const result = await runAdvance(state, action, fallbackPublic, [], aiPermission.allowAi);
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_second_rule";
@@ -147,7 +156,7 @@ export default async function handler(req, res) {
     if (action === "after_second_rule") {
       state.secondRule = validateContribution(body.secondRule, { min: 6, max: 120 });
       const fallbackPublic = fallbackAfterSecondRule(state);
-      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_FINAL);
+      const result = await runAdvance(state, action, fallbackPublic, DEFAULT_CHOICES_FINAL, aiPermission.allowAi);
       state = mergePrivatePatch(state, result.privatePatch);
       if (result.usageResult) state.aiUsage = mergeUsageTotals(state.aiUsage, result.usageResult);
       state.phase = "awaiting_final_choice";
@@ -168,14 +177,24 @@ export default async function handler(req, res) {
       const fallbackArchive = fallbackFinalArchive(state);
       let archive = fallbackArchive;
       aiMode = "fallback";
-      if (process.env.DEEPSEEK_API_KEY) {
+      if (aiPermission.allowAi && process.env.DEEPSEEK_API_KEY) {
         try {
-          const result = await callDeepSeek({ model: proModel(), system: [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt], user: finalUserPrompt({ state }), thinking: true, reasoningEffort: "high", maxTokens: 7600, userId: hashValue(state.sessionId) });
+          const result = await callDeepSeek({
+            model: proModel(),
+            system: [directorFoundationPrompt, storyContextPrompt(state), finalSystemPrompt],
+            user: finalUserPrompt({ state }),
+            thinking: true,
+            reasoningEffort: "high",
+            maxTokens: 7600,
+            userId: hashValue(state.sessionId)
+          });
           archive = validateArchive(result.data, fallbackArchive, state);
           aiMode = "deepseek-pro";
           state.aiCalls += 1;
           state.aiUsage = mergeUsageTotals(state.aiUsage, result);
-        } catch (error) { console.error("DeepSeek finalize failed; fallback used", error); }
+        } catch (error) {
+          console.error("DeepSeek finalize failed; fallback used", error);
+        }
       }
       state.phase = "sealed";
       state.sealedAt = new Date().toISOString();
@@ -190,13 +209,21 @@ export default async function handler(req, res) {
 
     const status = state.phase === "sealed" ? "sealed" : "active";
     const stateToken = await persist(state, loaded.mode, status);
-    return json(res, 200, { ...publicResult, sessionId: state.sessionId, stateToken, phase: state.phase, aiMode, cloudMode: loaded.mode, shareSlug });
+    return json(res, 200, {
+      ...publicResult,
+      sessionId: state.sessionId,
+      stateToken,
+      phase: state.phase,
+      aiMode,
+      cloudMode: loaded.mode,
+      shareSlug,
+      budgetFallback: aiPermission.fallbackReason || null
+    });
   } catch (error) {
     console.error("director error", error);
     const code = String(error?.message || "");
     if (code === "SESSION_NOT_FOUND" || code.includes("INVALID_STATE_TOKEN")) return json(res, 401, { error: "这份档案的临时通行证已经失效，请重新开局。" });
     if (code === "RATE_LIMIT_MINUTE") return json(res, 429, { error: "档案翻页太快了，请停一会儿再继续。" });
-    if (code === "RATE_LIMIT_DAY") return json(res, 429, { error: "今天的档案调用额度已经用完，请明天再来。" });
     if (error instanceof Error && /记录|档案|至少|最多|填写|重复字符/.test(error.message)) return json(res, 400, { error: error.message });
     return json(res, 500, { error: "档案暂时无法继续，但你写下的句子没有丢失。请再试一次。" });
   }
