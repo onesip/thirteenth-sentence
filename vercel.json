@@ -25,6 +25,7 @@
   ],
   "rewrites": [
     { "source": "/", "destination": "/index.html" },
-    { "source": "/archive/:slug", "destination": "/index.html?archive=:slug" }
+    { "source": "/archive/:slug", "destination": "/index.html?archive=:slug" },
+    { "source": "/((?!api/|assets/).*)", "destination": "/index.html" }
   ]
 }
