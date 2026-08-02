@@ -51,8 +51,8 @@ async function generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, r
       : playSeedUserPrompt({ archiveRecord, partySize, roleOrder, randomSeed }),
     thinking: false,
     reasoningEffort: "low",
-    maxTokens: recovery ? 1150 : 1700,
-    timeoutMs: recovery ? 12000 : 20000,
+    maxTokens: recovery ? 1050 : 1450,
+    timeoutMs: recovery ? 10000 : 18000,
     maxAttempts: 1,
     userId: ipKey
   });
@@ -60,7 +60,7 @@ async function generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, r
   return {
     blueprint: adaptBlueprintParty(normalizePlayBlueprint(result.data, archiveRecord, partySize), partySize),
     result,
-    mode: recovery ? "deepseek-compact-recovery-blueprint" : "deepseek-five-scene-blueprint"
+    mode: recovery ? "deepseek-compact-spine-recovery" : "deepseek-five-scene-spine"
   };
 }
 
@@ -94,7 +94,7 @@ export default async function handler(req, res) {
 
     if (preferCache) {
       generated = pickCached(cached, archiveRecord, partySize);
-      aiMode = "cached-ai-blueprint";
+      aiMode = "cached-ai-spine";
     } else {
       const ipKey = hashValue(requestIp(req));
       const permission = await aiPermission(ipKey);
@@ -107,7 +107,7 @@ export default async function handler(req, res) {
           aiUsage = mergeUsageTotals(aiUsage, live.result);
         } catch (firstError) {
           failureCode = String(firstError?.message || "BLUEPRINT_PRIMARY_FAILED");
-          console.error("full play blueprint failed; one compact recovery starting", firstError);
+          console.error("full scene spine failed; compact recovery starting", firstError);
           try {
             const recovery = await generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, recovery: true });
             generated = recovery.blueprint;
@@ -115,13 +115,13 @@ export default async function handler(req, res) {
             aiUsage = mergeUsageTotals(aiUsage, recovery.result);
           } catch (recoveryError) {
             failureCode = String(recoveryError?.message || failureCode || "BLUEPRINT_RECOVERY_FAILED");
-            console.error("compact play blueprint also failed", recoveryError);
+            console.error("compact scene spine also failed", recoveryError);
           }
         }
       }
       if (!generated && cached.length) {
         generated = pickCached(cached, archiveRecord, partySize);
-        aiMode = "cached-ai-blueprint-recovery";
+        aiMode = "cached-ai-spine-recovery";
       }
     }
 
@@ -130,12 +130,12 @@ export default async function handler(req, res) {
       const isIncomplete = failureCode?.includes("INCOMPLETE") || failureCode?.includes("INVALID_JSON");
       return json(res, 503, {
         error: permissionReason
-          ? "这份档案现在没有可用的馆藏路线，今日展开额度也暂时不足。请稍后再进入。"
+          ? "这份档案目前没有可复用路线，今日展开额度也暂时不足。请稍后再进入。"
           : isTimeout
-            ? "档案馆在限定时间内没有完成这条路线。本次已停止继续等待，请重新尝试或换一份档案。"
+            ? "档案馆在限定时间内没有写完五幕故事骨架。本次已经停止等待，请换一份档案或稍后重试。"
             : isIncomplete
-              ? "这次生成的路线缺少关键场景，为了不拿粗糙模板冒充剧情，本次没有打开。请重试。"
-              : "这份档案没有完整展开。为了不让通用模板破坏故事，本次没有强行进入，请重新尝试。",
+              ? "这次返回的五幕骨架不完整。本次没有使用通用模板代替，请换一份档案或重新尝试。"
+              : "这份档案暂时没有完成展开，请换一份档案或稍后重试。",
         code: "BLUEPRINT_NOT_READY",
         reason: failureCode || permissionReason || "unknown"
       });
@@ -143,9 +143,9 @@ export default async function handler(req, res) {
 
     const sessionId = randomId();
     const state = {
-      version: 6,
+      version: 7,
       mode: "enter_archive",
-      aiStrategy: "bounded-quality-blueprint-local-final",
+      aiStrategy: "compact-spine-local-final",
       blueprintSource: aiMode,
       sessionId,
       roomCode: randomCode(6),
