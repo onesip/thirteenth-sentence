@@ -51,8 +51,9 @@ async function generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, r
       : playSeedUserPrompt({ archiveRecord, partySize, roleOrder, randomSeed }),
     thinking: false,
     reasoningEffort: "low",
-    maxTokens: recovery ? 1800 : 2500,
-    timeoutMs: recovery ? 18000 : 30000,
+    maxTokens: recovery ? 1150 : 1700,
+    timeoutMs: recovery ? 12000 : 20000,
+    maxAttempts: 1,
     userId: ipKey
   });
   assertBlueprintQuality(result.data);
@@ -88,6 +89,7 @@ export default async function handler(req, res) {
     let aiMode = "";
     let aiUsage = {};
     let permissionReason = null;
+    let failureCode = null;
     const preferCache = cached.length >= 2 && Math.random() < 0.7;
 
     if (preferCache) {
@@ -104,13 +106,15 @@ export default async function handler(req, res) {
           aiMode = live.mode;
           aiUsage = mergeUsageTotals(aiUsage, live.result);
         } catch (firstError) {
-          console.error("full play blueprint failed; compact recovery starting", firstError);
+          failureCode = String(firstError?.message || "BLUEPRINT_PRIMARY_FAILED");
+          console.error("full play blueprint failed; one compact recovery starting", firstError);
           try {
             const recovery = await generateBlueprint({ archiveRecord, partySize, roleOrder, ipKey, recovery: true });
             generated = recovery.blueprint;
             aiMode = recovery.mode;
             aiUsage = mergeUsageTotals(aiUsage, recovery.result);
           } catch (recoveryError) {
+            failureCode = String(recoveryError?.message || failureCode || "BLUEPRINT_RECOVERY_FAILED");
             console.error("compact play blueprint also failed", recoveryError);
           }
         }
@@ -122,19 +126,26 @@ export default async function handler(req, res) {
     }
 
     if (!generated) {
+      const isTimeout = failureCode?.includes("TIMEOUT");
+      const isIncomplete = failureCode?.includes("INCOMPLETE") || failureCode?.includes("INVALID_JSON");
       return json(res, 503, {
         error: permissionReason
           ? "这份档案现在没有可用的馆藏路线，今日展开额度也暂时不足。请稍后再进入。"
-          : "这份档案没有完整展开。为了不让通用模板破坏故事，本次没有强行进入，请重新尝试。",
-        code: "BLUEPRINT_NOT_READY"
+          : isTimeout
+            ? "档案馆在限定时间内没有完成这条路线。本次已停止继续等待，请重新尝试或换一份档案。"
+            : isIncomplete
+              ? "这次生成的路线缺少关键场景，为了不拿粗糙模板冒充剧情，本次没有打开。请重试。"
+              : "这份档案没有完整展开。为了不让通用模板破坏故事，本次没有强行进入，请重新尝试。",
+        code: "BLUEPRINT_NOT_READY",
+        reason: failureCode || permissionReason || "unknown"
       });
     }
 
     const sessionId = randomId();
     const state = {
-      version: 5,
+      version: 6,
       mode: "enter_archive",
-      aiStrategy: "quality-blueprint-local-final",
+      aiStrategy: "bounded-quality-blueprint-local-final",
       blueprintSource: aiMode,
       sessionId,
       roomCode: randomCode(6),
