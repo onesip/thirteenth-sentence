@@ -3,12 +3,12 @@ import { callDeepSeek, fastModel, mergeUsageTotals } from "../lib/deepseek.js";
 import { json, methodNotAllowed, readJson, requestIp } from "../lib/http.js";
 import {
   applyMetrics,
-  fallbackAdvance,
   fallbackEnding,
-  normalizeAdvance,
+  metricsForApproach,
   normalizeEnding
 } from "../lib/play-core.js";
-import { playAdvanceUserPrompt, playFoundationPrompt } from "../lib/play-prompts.js";
+import { resolveBlueprintStep } from "../lib/play-blueprint.js";
+import { playFinalUserPrompt, playFoundationPrompt } from "../lib/play-prompts.js";
 import {
   cloudConfigured,
   enforceRateLimit,
@@ -35,23 +35,23 @@ async function persist(state, mode, status = "active") {
   return encryptState(state);
 }
 
-async function aiPermission(req) {
+async function finalAiPermission(req) {
   if (!process.env.DEEPSEEK_API_KEY) return { allowAi: false, reason: "no-key" };
   if (!cloudConfigured()) return { allowAi: true };
   const key = hashValue(requestIp(req));
-  const minute = await enforceRateLimit({ key, scope: "play-director-minute", limit: 10, windowMinutes: 1 });
+  const minute = await enforceRateLimit({ key, scope: "play-final-minute", limit: 6, windowMinutes: 1 });
   if (!minute.allowed) throw new Error("RATE_LIMIT_MINUTE");
   const device = await enforceRateLimit({
     key,
-    scope: "play-director-device-day",
-    limit: Math.max(20, Number(process.env.DEVICE_DAILY_AI_LIMIT || 40)),
+    scope: "play-final-device-day",
+    limit: Math.max(8, Number(process.env.DEVICE_DAILY_AI_LIMIT || 40)),
     windowMinutes: 1440
   });
   if (!device.allowed) return { allowAi: false, reason: "device-budget" };
   const global = await enforceRateLimit({
     key: "__global__",
-    scope: "play-director-global-day",
-    limit: Math.max(50, Number(process.env.DAILY_AI_LIMIT || 60)),
+    scope: "play-final-global-day",
+    limit: Math.max(24, Number(process.env.DAILY_AI_LIMIT || 60)),
     windowMinutes: 1440
   });
   return global.allowed ? { allowAi: true } : { allowAi: false, reason: "global-budget" };
@@ -91,15 +91,25 @@ function metricsView(metrics) {
   };
 }
 
-async function generateStep(state, selectedOption, isFinal) {
+function choicePatch(option) {
+  const effect = option?.effect && typeof option.effect === "object" ? option.effect : {};
+  return {
+    metricsDelta: effect.metricsDelta || metricsForApproach(option?.approach),
+    addFlags: Array.isArray(effect.addFlags) ? effect.addFlags.slice(0, 4) : [`final-${option?.id || "choice"}`],
+    consequenceNote: String(effect.consequenceNote || "最终选择改变了出口承认的身份版本。"),
+    identityFragment: String(effect.identityFragment || "")
+  };
+}
+
+async function generateEnding(state, selectedOption) {
   const result = await callDeepSeek({
     model: fastModel(),
     system: [playFoundationPrompt],
-    user: playAdvanceUserPrompt({ state, selectedOption }),
+    user: playFinalUserPrompt({ state, selectedOption }),
     thinking: false,
-    reasoningEffort: isFinal ? "high" : "medium",
-    maxTokens: isFinal ? 4200 : 2400,
-    timeoutMs: isFinal ? 17000 : 11000,
+    reasoningEffort: "high",
+    maxTokens: 2400,
+    timeoutMs: 17000,
     userId: hashValue(state.sessionId)
   });
   return { result, data: result.data };
@@ -120,28 +130,42 @@ export default async function handler(req, res) {
     const selectedOption = options.find((option) => String(option.id) === optionId);
     if (!selectedOption) return json(res, 400, { error: "请选择当前场景中存在的行动。" });
 
-    const permission = await aiPermission(req);
     const isFinal = Number(state.sceneIndex || 0) >= Number(state.totalScenes || 5) - 1;
-    let output = isFinal ? fallbackEnding(state, selectedOption) : fallbackAdvance(state, selectedOption);
-    let aiMode = "fallback-survival";
+    let output;
+    let aiMode = "local-blueprint-v2";
     let usageResult = null;
+    let budgetReason = null;
 
-    if (permission.allowAi) {
-      try {
-        const generated = await generateStep(state, selectedOption, isFinal);
-        output = isFinal
-          ? normalizeEnding(generated.data, state, selectedOption)
-          : normalizeAdvance(generated.data, state, selectedOption);
-        usageResult = generated.result;
-        aiMode = isFinal ? "deepseek-survival-final" : "deepseek-survival-scene";
-      } catch (error) {
-        console.error("play director missed live deadline; fallback used", error);
+    if (isFinal) {
+      // Apply the fifth choice locally before asking the model to interpret the complete route.
+      const patch = choicePatch(selectedOption);
+      state.metrics = applyMetrics(state.metrics, patch.metricsDelta);
+      state.routeFlags = [...new Set([...(state.routeFlags || []), ...patch.addFlags])].slice(-30);
+      const fallback = fallbackEnding(state, selectedOption);
+      output = fallback;
+      const permission = await finalAiPermission(req);
+      budgetReason = permission.reason || null;
+      if (permission.allowAi) {
+        try {
+          const generated = await generateEnding(state, selectedOption);
+          output = normalizeEnding(generated.data, state, selectedOption);
+          usageResult = generated.result;
+          aiMode = "deepseek-compact-final-v2";
+        } catch (error) {
+          console.error("compact final missed live deadline; complete local ending used", error);
+          aiMode = "fallback-final-v2";
+        }
+      } else {
+        aiMode = "fallback-final-v2";
       }
+      // The final choice was already applied above.
+      output.privatePatch = { metricsDelta: { evidence: 0, contamination: 0, identity: 0, trust: 0 }, addFlags: [] };
+    } else {
+      output = resolveBlueprintStep(state, selectedOption);
+      state.metrics = applyMetrics(state.metrics, output.privatePatch?.metricsDelta || {});
+      state.routeFlags = [...new Set([...(state.routeFlags || []), ...(output.privatePatch?.addFlags || [])])].slice(-30);
     }
 
-    const delta = output.privatePatch?.metricsDelta || {};
-    state.metrics = applyMetrics(state.metrics, delta);
-    state.routeFlags = [...new Set([...(state.routeFlags || []), ...(output.privatePatch?.addFlags || [])])].slice(-30);
     const historyItem = {
       sceneNo: Number(state.sceneIndex || 0) + 1,
       sceneTitle: state.currentScene?.title || `第${Number(state.sceneIndex || 0) + 1}幕`,
@@ -150,7 +174,7 @@ export default async function handler(req, res) {
       action: selectedOption.action,
       approach: selectedOption.approach,
       ruleRefs: selectedOption.ruleRefs || [],
-      consequenceNote: output.privatePatch?.consequenceNote || "",
+      consequenceNote: selectedOption.effect?.consequenceNote || output.privatePatch?.consequenceNote || "",
       metricsAfter: state.metrics
     };
     state.choiceHistory = [...(state.choiceHistory || []), historyItem];
@@ -215,7 +239,9 @@ export default async function handler(req, res) {
       totalScenes: state.totalScenes,
       metricsView: metricsView(state.metrics),
       aiMode,
-      budgetFallback: permission.reason || null,
+      aiStrategy: "blueprint-local-final",
+      plannedAiCallsPerGame: 2,
+      budgetFallback: budgetReason,
       sourceArchiveSlug: state.sourceArchiveSlug
     });
   } catch (error) {
