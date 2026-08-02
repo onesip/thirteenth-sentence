@@ -105,20 +105,17 @@ async function probeSupabase() {
 
 export default async function handler(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
-  const url = new URL(req.url || "/api/diagnostics", "http://localhost");
-  const full = url.searchParams.get("full") === "1";
   const [deepseek, supabase] = await Promise.all([
     probeDeepSeekModels(),
     probeSupabase()
   ]);
-  const generation = full && deepseek.ok ? await probeDeepSeekGeneration() : null;
+  const generation = deepseek.ok ? await probeDeepSeekGeneration() : null;
   return json(res, 200, {
-    ok: deepseek.ok && supabase.ok && (!full || generation?.ok),
+    version: "diagnostics-v3",
+    ok: deepseek.ok && supabase.ok && generation?.ok,
     deepseek,
     generation,
     supabase,
-    note: full
-      ? "Full diagnostics validates the same DeepSeek generation path used by the game."
-      : "Add ?full=1 to validate a real short generation call."
+    note: "This endpoint always validates the same DeepSeek generation path used by the game."
   });
 }
